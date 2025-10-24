@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { loadWallet, saveWallet, defaultKeyfile, accountFromWallet, Wallet } from '../lib/keeta.js';
+import { readOnlyClientFrom, clientFrom, asAccount } from '../lib/keeta.js';
 import { lib } from '@keetanetwork/keetanet-client';
 
 const { Account } = lib;
@@ -231,6 +232,124 @@ export function addWalletCommands(program: Command): void {
           }
         }
         console.log('');
+      }
+    });
+
+  program
+    .command('wallet:scan-balances')
+    .description('Scan balances for derived accounts from a mnemonic or current wallet seed')
+    .option('--mnemonic <words>', '24-word mnemonic phrase (optional; uses current wallet if omitted)')
+    .option('--algos <list>', 'comma-separated list of algos to scan: ed25519,secp256k1,secp256r1 (default: current wallet algo or ed25519)', '')
+    .option('--start <n>', 'start derivation index (inclusive)', '0')
+    .option('--end <n>', 'end derivation index (inclusive)', '10')
+    .option('--network <net>', 'network: test or main', 'test')
+    .option('--verbose', 'print zero-balance accounts too')
+    .option('--keyfile <path>', 'keystore file path (used if --mnemonic not provided)', '~/.keeta/wallet.json')
+    .action(async (opts) => {
+      let seedHex: string | null = null;
+      let defaultAlgo: string | null = null;
+
+      if (opts.mnemonic) {
+        const mnemonic = String(opts.mnemonic).trim();
+        const words = mnemonic.split(/\s+/);
+        if (words.length !== 24) {
+          console.error('Mnemonic must be exactly 24 words');
+          process.exit(1);
+        }
+        const seed = await Account.seedFromPassphrase(mnemonic, { asString: true });
+        seedHex = seed as string;
+        defaultAlgo = 'ed25519';
+      } else {
+        const wallet = loadWallet(defaultKeyfile());
+        if (!wallet || (!wallet.seed && !wallet.privateKeySecp256k1)) {
+          console.error('No wallet seed found. Provide --mnemonic or create/import a wallet first.');
+          process.exit(1);
+        }
+        if (wallet.privateKeySecp256k1) {
+          console.error('Scanning requires a seed-based wallet. Private key import cannot derive indices.');
+          process.exit(1);
+        }
+        seedHex = wallet.seed!;
+        defaultAlgo = wallet.algo || 'ed25519';
+      }
+
+      const start = parseInt(opts.start);
+      const end = parseInt(opts.end);
+      if (isNaN(start) || isNaN(end) || start < 0 || end < start) {
+        console.error('Invalid range. Use --start N --end M with 0 <= N <= M');
+        process.exit(1);
+      }
+
+      // Determine algorithms to scan
+      let algos: string[];
+      if (opts.algos) {
+        algos = String(opts.algos).split(',').map((s: string) => s.trim().toLowerCase()).filter(Boolean);
+      } else {
+        algos = [defaultAlgo!];
+      }
+      const validAlgos = new Set(['ed25519', 'secp256k1', 'secp256r1']);
+      for (const a of algos) {
+        if (!validAlgos.has(a)) {
+          console.error(`Invalid algo: ${a}. Use ed25519,secp256k1,secp256r1`);
+          process.exit(1);
+        }
+      }
+
+      console.log(`🔎 Scanning balances on ${opts.network} for indices ${start}..${end} across algos: ${algos.join(', ')}`);
+      console.log('');
+
+      const found: Array<{ algo: string; index: number; address: string; balances: Record<string, string> | Array<any> }>= [];
+      const client = readOnlyClientFrom(opts.network);
+
+      for (const algo of algos) {
+        for (let index = start; index <= end; index++) {
+          try {
+            const wallet: Wallet = { seed: seedHex!, index, algo: algo as any };
+            const acct = accountFromWallet(wallet);
+            const address = acct.publicKeyString.toString();
+            const info = await client.client.getAccountInfo(acct);
+            const balances = info.balances || {};
+
+            const count = Array.isArray(balances) ? balances.length : Object.keys(balances).length;
+            if (count > 0 || opts.verbose) {
+              console.log(`📄 ${algo} [${index}] ${address}`);
+              if (count === 0) {
+                console.log('   💰 No balances');
+              } else {
+                // Print a compact summary; names can be fetched via extra calls, skip for speed
+                if (Array.isArray(balances)) {
+                  for (const entry of balances as any[]) {
+                    if (Array.isArray(entry) && entry.length >= 2) {
+                      console.log(`   🪙 ${String(entry[0]).substring(0,12)}...: ${entry[1]}`);
+                    } else if (entry && typeof entry === 'object') {
+                      const tokenAddr = (entry as any).token || (entry as any).address || (entry as any).id || 'unknown';
+                      const bal = (entry as any).balance || (entry as any).amount || 0;
+                      console.log(`   🪙 ${String(tokenAddr).substring(0,12)}...: ${bal}`);
+                    }
+                  }
+                } else {
+                  for (const [tokenAddr, bal] of Object.entries(balances as Record<string, any>)) {
+                    console.log(`   🪙 ${tokenAddr.substring(0,12)}...: ${String(bal)}`);
+                  }
+                }
+              }
+              found.push({ algo, index, address, balances });
+            }
+          } catch (err) {
+            console.log(`⚠️  ${algo} [${index}] network error`);
+          }
+        }
+      }
+
+      console.log('');
+      console.log(`✅ Scan complete. Matches with balances: ${found.length}`);
+      if (found.length > 0) {
+        console.log('');
+        console.log('Top results:');
+        for (const f of found.slice(0, 10)) {
+          const count = Array.isArray(f.balances) ? f.balances.length : Object.keys(f.balances).length;
+          console.log(` • ${f.algo} [${f.index}] ${f.address.substring(0,24)}... — ${count} token(s)`);
+        }
       }
     });
 }

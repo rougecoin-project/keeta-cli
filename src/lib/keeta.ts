@@ -58,6 +58,10 @@ export function clientFrom(network: string, account?: any) {
   return UserClient.fromNetwork(network as any, account || null);
 }
 
+export function readOnlyClientFrom(network: string) {
+  return UserClient.fromNetwork(network as any, null);
+}
+
 export function asAccount(addr: string) {
   return Account.fromPublicKeyString(addr);
 }
