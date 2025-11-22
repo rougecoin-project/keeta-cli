@@ -63,6 +63,22 @@ export function addAccountCommands(program: Command): void {
             // Get the base token address for reference
             const baseTokenAddr = client.baseToken.publicKeyString.toString();
             
+            // Helper function to format balance with decimals
+            const formatBalance = (balance: bigint, decimals: number): string => {
+              const divisor = BigInt(10) ** BigInt(decimals);
+              const wholePart = balance / divisor;
+              const fractionalPart = balance % divisor;
+              
+              if (fractionalPart === 0n) {
+                return wholePart.toString();
+              }
+              
+              const fractionalStr = fractionalPart.toString().padStart(decimals, '0');
+              // Remove trailing zeros
+              const trimmed = fractionalStr.replace(/0+$/, '');
+              return trimmed ? `${wholePart}.${trimmed}` : wholePart.toString();
+            };
+            
             if (opts.address) {
               // Handle external account balance structure. SDK may return:
               // - Array of [tokenAddr, balance] tuples
@@ -70,20 +86,34 @@ export function addAccountCommands(program: Command): void {
               // - Object map { tokenAddr: balance }
               const printOne = async (tokenAddr: string, balanceVal: any) => {
                 let tokenDisplay: string;
+                let decimals = 18; // Default to 18 decimals (most common)
+                
                 if (tokenAddr === baseTokenAddr) {
                   tokenDisplay = `KEETA (Base Token)`;
                 } else {
                   try {
                     const tokenAccount = asAccount(tokenAddr);
                     const tokenAccountInfo = await client.client.getAccountInfo(tokenAccount);
-                    tokenDisplay = tokenAccountInfo.info?.name
-                      ? `${tokenAccountInfo.info.name} (${tokenAddr.substring(0, 12)}...)`
-                      : `${tokenAddr.substring(0, 12)}...`;
+                    const tokenName = tokenAccountInfo.info?.name || tokenAddr.substring(0, 12) + '...';
+                    tokenDisplay = `${tokenName} (${tokenAddr.substring(0, 10)}...)`;
+                    
+                    // Try to get decimals from metadata
+                    if (tokenAccountInfo.info?.metadata) {
+                      try {
+                        const metadata = JSON.parse(Buffer.from(tokenAccountInfo.info.metadata, 'base64').toString());
+                        if (metadata.decimalPlaces !== undefined) {
+                          decimals = metadata.decimalPlaces;
+                        }
+                      } catch {}
+                    }
                   } catch {
                     tokenDisplay = `${tokenAddr.substring(0, 12)}...`;
                   }
                 }
-                console.log(`  ${tokenDisplay}: ${balanceVal.toString()}`);
+                
+                const balance = typeof balanceVal === 'bigint' ? balanceVal : BigInt(balanceVal.toString());
+                const formattedBalance = formatBalance(balance, decimals);
+                console.log(`  ${tokenDisplay}: ${formattedBalance}`);
               };
 
               if (Array.isArray(all)) {
@@ -108,10 +138,12 @@ export function addAccountCommands(program: Command): void {
                 // Use JSON conversion to get the actual address string
                 const tokenInfo = JSON.parse(JSON.stringify(balanceData, (k, v) => typeof v === 'bigint' ? v.toString() : v));
                 const tokenAddr = tokenInfo.token;
-                const balance = tokenInfo.balance;
+                const rawBalance = tokenInfo.balance;
                 
                 // Display token information with proper names
                 let tokenDisplay;
+                let decimals = 18; // Default to 18 decimals
+                
                 if (tokenAddr === baseTokenAddr) {
                   tokenDisplay = `KEETA (Base Token)`;
                 } else {
@@ -121,16 +153,28 @@ export function addAccountCommands(program: Command): void {
                     const tokenAccountInfo = await client.client.getAccountInfo(tokenAccount);
                     
                     if (tokenAccountInfo.info && tokenAccountInfo.info.name) {
-                      tokenDisplay = `${tokenAccountInfo.info.name} (${tokenAddr.substring(0, 12)}...)`;
+                      tokenDisplay = `${tokenAccountInfo.info.name} (${tokenAddr.substring(0, 10)}...)`;
                     } else {
                       tokenDisplay = `${tokenAddr.substring(0, 12)}...`;
+                    }
+                    
+                    // Try to get decimals from metadata
+                    if (tokenAccountInfo.info?.metadata) {
+                      try {
+                        const metadata = JSON.parse(Buffer.from(tokenAccountInfo.info.metadata, 'base64').toString());
+                        if (metadata.decimalPlaces !== undefined) {
+                          decimals = metadata.decimalPlaces;
+                        }
+                      } catch {}
                     }
                   } catch {
                     tokenDisplay = `${tokenAddr.substring(0, 12)}...`;
                   }
                 }
                 
-                console.log(`  ${tokenDisplay}: ${balance}`);
+                const balance = BigInt(rawBalance);
+                const formattedBalance = formatBalance(balance, decimals);
+                console.log(`  ${tokenDisplay}: ${formattedBalance}`);
               }
             }
             
